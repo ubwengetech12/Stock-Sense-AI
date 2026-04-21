@@ -1,0 +1,83 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Inventory item tracked in the store",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The owner of this product" },
+        "name": { "type": "string" },
+        "category": { "type": "string", "enum": ["Food & Drinks", "Household", "Electronics", "Clothing", "Other"] },
+        "unit": { "type": "string", "enum": ["pieces", "kg", "liters", "boxes", "packs"] },
+        "currentStock": { "type": "integer" },
+        "minStock": { "type": "integer" },
+        "reorderPoint": { "type": "integer" },
+        "costPrice": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "supplierId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "category", "unit", "costPrice", "sellingPrice"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Distributor or manufacturer providing goods",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "contact": { "type": "string" },
+        "whatsappNumber": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "productsSupplied": { "type": "array", "items": { "type": "string" } },
+        "lastOrderDate": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name"]
+    },
+    "SaleRecord": {
+      "title": "Sale Record",
+      "description": "Record of a completed sale transaction",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "productId": { "type": "string" },
+        "quantity": { "type": "integer" },
+        "totalAmount": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "productId", "quantity", "totalAmount"]
+    },
+    "PurchaseOrder": {
+      "title": "Purchase Order",
+      "description": "Order sent to a supplier",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "sent", "received"] },
+        "sentViaWhatsapp": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "supplierId", "status"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Main inventory collection"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": "Supplier",
+      "description": "Supplier contact information"
+    },
+    "/sales/{saleId}": {
+      "schema": "SaleRecord",
+      "description": "Transaction logs"
+    },
+    "/orders/{orderId}": {
+      "schema": "PurchaseOrder",
+      "description": "Purchase order records"
+    }
+  }
+}

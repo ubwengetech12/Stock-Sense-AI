@@ -1,0 +1,6 @@
+{
+  "name": "StockSense AI",
+  "description": "AI-powered inventory management for small shops in Rwanda. Features demand forecasting, competitor radar, and WhatsApp ordering.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

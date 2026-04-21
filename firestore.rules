@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // --- Validations ---
+    function isValidProduct(data) {
+      return data.userId is string && isOwner(data.userId)
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+        && data.category in ['Food & Drinks', 'Household', 'Electronics', 'Clothing', 'Other']
+        && data.unit in ['pieces', 'kg', 'liters', 'boxes', 'packs']
+        && data.currentStock is int && data.currentStock >= 0
+        && data.costPrice is number && data.costPrice >= 0
+        && data.sellingPrice is number && data.sellingPrice >= 0;
+    }
+
+    function isValidSale(data) {
+      return data.userId is string && isOwner(data.userId)
+        && data.productId is string && isValidId(data.productId)
+        && data.quantity is int && data.quantity > 0
+        && data.totalAmount is number && data.totalAmount >= 0;
+    }
+
+    // --- Rules ---
+    match /products/{productId} {
+      allow get: if isOwner(existing().userId);
+      allow list: if isOwner(resource.data.userId);
+      allow create: if isVerified() && isValidProduct(incoming()) 
+        && incoming().createdAt == request.time;
+      allow update: if isVerified() && isOwner(existing().userId) && isValidProduct(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Stock Update
+          (incoming().diff(existing()).affectedKeys().hasOnly(['currentStock', 'updatedAt'])) ||
+          // Action: Full Edit
+          (incoming().diff(existing()).affectedKeys().hasOnly(['name', 'category', 'unit', 'minStock', 'reorderPoint', 'costPrice', 'sellingPrice', 'supplierId', 'updatedAt']))
+        );
+      allow delete: if isOwner(existing().userId);
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if isOwner(resource.data.userId);
+      allow create: if isVerified() && isOwner(incoming().userId);
+      allow update: if isVerified() && isOwner(existing().userId) && incoming().userId == existing().userId;
+      allow delete: if isOwner(existing().userId);
+    }
+
+    match /sales/{saleId} {
+      allow read: if isOwner(resource.data.userId);
+      allow create: if isVerified() && isValidSale(incoming())
+        && exists(/databases/$(database)/documents/products/$(incoming().productId))
+        && get(/databases/$(database)/documents/products/$(incoming().productId)).data.userId == request.auth.uid;
+    }
+    
+    match /orders/{orderId} {
+      allow read: if isOwner(resource.data.userId);
+      allow create: if isVerified() && isOwner(incoming().userId);
+      allow update: if isVerified() && isOwner(existing().userId) && incoming().userId == existing().userId;
+    }
+  }
+}
