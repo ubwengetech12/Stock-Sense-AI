@@ -1,6 +1,6 @@
 // File: src/pages/Inventory.tsx
-import { useState } from "react";
-import { Package, Plus, Search } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { Package, Plus, Search, X, SlidersHorizontal } from "lucide-react";
 import { ProductTable } from "../components/inventory/ProductTable";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -24,11 +24,42 @@ const EMPTY: NewProduct = {
   costPrice: 0, sellingPrice: 0, supplierId: ''
 };
 
+// Quick-filter chips shown below search
+const QUICK_FILTERS = [
+  { label: '🔴 Critical', value: 'critical' },
+  { label: '⚠️ Low Stock', value: 'low' },
+  { label: '✅ Healthy', value: 'healthy' },
+  { label: '🍔 Food & Drinks', value: 'Food & Drinks' },
+  { label: '🏠 Household', value: 'Household' },
+  { label: '📱 Electronics', value: 'Electronics' },
+  { label: '👕 Clothing', value: 'Clothing' },
+];
+
 export default function Inventory() {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState<NewProduct>(EMPTY);
   const [search, setSearch] = useState('');
-  const { addProduct, suppliers } = useStore();
+  const [activeFilter, setActiveFilter] = useState('');
+  const [isFocused, setIsFocused] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const { addProduct, suppliers, products } = useStore();
+
+  // Keyboard shortcut: Ctrl+K or / to focus search
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey && e.key === 'k') || (e.key === '/' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA')) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+      if (e.key === 'Escape') {
+        setSearch('');
+        setActiveFilter('');
+        searchRef.current?.blur();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   const handleAdd = async () => {
     if (!form.name) return;
@@ -36,6 +67,48 @@ export default function Inventory() {
     setForm(EMPTY);
     setShowModal(false);
   };
+
+  const handleQuickFilter = (val: string) => {
+    setActiveFilter(prev => prev === val ? '' : val);
+    setSearch('');
+  };
+
+  const clearSearch = () => {
+    setSearch('');
+    setActiveFilter('');
+    searchRef.current?.focus();
+  };
+
+  // Count how many products match current search for live counter
+  const matchCount = products.filter(p => {
+    const q = search.toLowerCase().trim();
+    const supplier = suppliers.find(s => s.id === p.supplierId);
+    const isLow = p.currentStock <= p.minStock;
+    const isCritical = p.currentStock <= p.minStock / 2;
+    const statusStr = isCritical ? 'critical' : isLow ? 'low' : 'healthy';
+
+    if (activeFilter) {
+      if (activeFilter === 'critical') return isCritical;
+      if (activeFilter === 'low') return isLow && !isCritical;
+      if (activeFilter === 'healthy') return !isLow;
+      if (p.category === activeFilter) return true;
+      return false;
+    }
+    if (!q) return true;
+    return (
+      p.name.toLowerCase().includes(q) ||
+      p.category.toLowerCase().includes(q) ||
+      p.unit.toLowerCase().includes(q) ||
+      statusStr.includes(q) ||
+      String(p.currentStock).includes(q) ||
+      String(p.sellingPrice).includes(q) ||
+      String(p.costPrice).includes(q) ||
+      (supplier?.name.toLowerCase().includes(q) ?? false) ||
+      (q === 'out' && p.currentStock === 0) ||
+      (q === 'expensive' && p.sellingPrice > 3000) ||
+      (q === 'cheap' && p.sellingPrice < 1000)
+    );
+  }).length;
 
   const field = (label: string, key: keyof NewProduct, type = 'text', options?: string[]) => (
     <div className="flex flex-col gap-1">
@@ -79,19 +152,79 @@ export default function Inventory() {
 
       {/* Table */}
       <Card className="p-0 border-none shadow-2xl bg-card">
-        <div className="p-6 border-b border-white/5">
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+
+        {/* ── Smart Search Bar ── */}
+        <div className="p-4 md:p-6 border-b border-white/5 space-y-3">
+          <div className={`relative flex items-center rounded-2xl transition-all duration-200 ${
+            isFocused
+              ? 'ring-2 ring-primary/40 bg-white/8'
+              : 'bg-white/5'
+          } border ${isFocused ? 'border-primary/40' : 'border-white/10'}`}>
+
+            <Search className={`w-4 h-4 absolute left-4 transition-colors ${isFocused ? 'text-primary' : 'text-text-muted'}`} />
+
             <input
+              ref={searchRef}
               type="text"
-              placeholder="Search products..."
+              placeholder="Search by name, category, price, stock status, supplier…"
               value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-sm focus:outline-none focus:border-primary/50 text-white placeholder:text-text-muted"
+              onChange={e => { setSearch(e.target.value); setActiveFilter(''); }}
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
+              className="w-full bg-transparent pl-11 pr-24 py-3 text-sm focus:outline-none text-white placeholder:text-text-muted"
             />
+
+            {/* Live result count */}
+            {(search || activeFilter) && (
+              <span className="absolute right-10 text-xs font-bold px-2 py-0.5 rounded-full"
+                style={{ backgroundColor: matchCount > 0 ? 'rgba(0,212,170,0.15)' : 'rgba(231,76,60,0.15)',
+                         color: matchCount > 0 ? '#00d4aa' : '#e74c3c' }}>
+                {matchCount} found
+              </span>
+            )}
+
+            {/* Clear button */}
+            {(search || activeFilter) ? (
+              <button onClick={clearSearch}
+                className="absolute right-3 p-1 rounded-lg text-text-muted hover:text-white hover:bg-white/10 transition-all">
+                <X className="w-4 h-4" />
+              </button>
+            ) : (
+              <span className="absolute right-3 text-[10px] font-bold text-text-muted/50 hidden md:block select-none">
+                Ctrl+K
+              </span>
+            )}
           </div>
+
+          {/* Quick filter chips */}
+          <div className="flex flex-wrap gap-2">
+            {QUICK_FILTERS.map(f => (
+              <button
+                key={f.value}
+                onClick={() => handleQuickFilter(f.value)}
+                className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+                  activeFilter === f.value
+                    ? 'bg-primary/20 border-primary/50 text-primary'
+                    : 'bg-white/5 border-white/10 text-text-muted hover:border-white/20 hover:text-white'
+                }`}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Search tips — shown when focused and empty */}
+          {isFocused && !search && !activeFilter && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-text-muted/60">
+              <span>Try: <button className="text-primary/70 hover:text-primary" onClick={() => setSearch('critical')}>critical</button></span>
+              <span><button className="text-primary/70 hover:text-primary" onClick={() => setSearch('out')}>out of stock</button></span>
+              <span><button className="text-primary/70 hover:text-primary" onClick={() => setSearch('Inyange')}>Inyange</button></span>
+              <span><button className="text-primary/70 hover:text-primary" onClick={() => setSearch('cheap')}>cheap</button></span>
+              <span><button className="text-primary/70 hover:text-primary" onClick={() => setSearch('expensive')}>expensive</button></span>
+            </div>
+          )}
         </div>
-        <ProductTable searchQuery={search} />
+
+        <ProductTable searchQuery={search} activeFilter={activeFilter} />
       </Card>
 
       {/* Add Product Modal */}

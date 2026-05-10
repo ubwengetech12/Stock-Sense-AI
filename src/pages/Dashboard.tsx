@@ -3,11 +3,12 @@ import { ShieldAlert, Activity, ArrowUpRight, TrendingUp, DollarSign, Package } 
 import { StatCard } from "../components/dashboard/StatCard";
 import { ForecastGrid } from "../components/dashboard/ForecastGrid";
 import { AlertsList } from "../components/dashboard/AlertsList";
+import { AIInsightsPanel } from "../components/dashboard/AIInsightsPanel";
 import { useStore } from "../store/useStore";
 import { Card } from "../components/ui/Card";
-import { motion, AnimatePresence } from "motion/react";
 import { formatDistanceToNow } from "date-fns";
 import { cn } from "../lib/utils";
+import { Activity as ActivityIcon, DollarSign as DS, Package as Pkg } from "lucide-react";
 
 function LiveActivityFeed() {
   const sales = useStore(state => state.sales);
@@ -23,7 +24,7 @@ function LiveActivityFeed() {
         type: 'sale' as const,
         title: `Sale: ${s.quantity}x ${product?.name || 'Product'}`,
         amount: `${s.totalAmount.toLocaleString()} RWF`,
-        time: formatDistanceToNow(new Date(s.date), { addSuffix: true })
+        time: formatDistanceToNow(new Date(s.date), { addSuffix: true }),
       };
     });
 
@@ -46,13 +47,8 @@ function LiveActivityFeed() {
         ) : (
           displayActivities.map((item) => (
             <div key={item.id} className="flex items-center gap-4 p-3 bg-white/[0.02] border border-white/5 rounded-xl hover:bg-white/[0.05] transition-all group">
-              <div className={cn(
-                "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
-                item.type === 'sale' ? "bg-success/10 text-success" : 
-                item.type === 'price' ? "bg-warning/10 text-warning" : "bg-primary/10 text-primary"
-              )}>
-                {item.type === 'sale' ? <DollarSign className="w-5 h-5" /> : 
-                 item.type === 'price' ? <TrendingUp className="w-5 h-5" /> : <Package className="w-5 h-5" />}
+              <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-success/10 text-success">
+                <DollarSign className="w-5 h-5" />
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-bold text-white truncate">{item.title}</p>
@@ -63,7 +59,7 @@ function LiveActivityFeed() {
           ))
         )}
       </div>
-      
+
       <button className="w-full mt-6 py-2 text-xs font-bold text-text-muted hover:text-white transition-colors bg-white/5 rounded-lg border border-white/5 uppercase tracking-widest">
         Full Transaction History
       </button>
@@ -74,35 +70,51 @@ function LiveActivityFeed() {
 export default function Dashboard() {
   const products = useStore(state => state.products);
   const alerts = useStore(state => state.alerts);
+  const sales = useStore(state => state.sales);
+
+  // Real monthly revenue from sales
+  const now = Date.now();
+  const MS_30 = 30 * 24 * 60 * 60 * 1000;
+  const monthlyRev = sales
+    .filter(s => now - new Date(s.date).getTime() <= MS_30)
+    .reduce((acc, s) => acc + s.totalAmount, 0);
+
+  const formatShort = (n: number) => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
+    return String(n);
+  };
 
   return (
     <div className="space-y-8 animate-in fade-in duration-700">
+      {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard 
-          label="Your Products" 
-          value={products.length.toString()} 
-          icon={Package} 
+        <StatCard
+          label="Your Products"
+          value={products.length.toString()}
+          icon={Package}
           change={12}
         />
-        <StatCard 
-          label="Low Stock" 
-          value={alerts.length > 0 ? alerts.length.toString() : "05"} 
-          icon={ShieldAlert} 
+        <StatCard
+          label="Low Stock"
+          value={alerts.length > 0 ? alerts.length.toString() : "0"}
+          icon={ShieldAlert}
           variant="urgent"
         />
-        <StatCard 
-          label="Total Sales" 
-          value="2.4M" 
-          icon={DollarSign} 
+        <StatCard
+          label="Monthly Sales"
+          value={formatShort(monthlyRev)}
+          icon={DollarSign}
           change={12}
         />
-        <StatCard 
-          label="AI Savings" 
-          value="84k" 
-          icon={Package} 
+        <StatCard
+          label="AI Savings"
+          value="84k"
+          icon={Package}
         />
       </div>
 
+      {/* Forecast + Live feed */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2">
           <ForecastGrid />
@@ -112,37 +124,10 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Alerts + AI Insights Panel */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <AlertsList />
-        
-        <Card className="p-6">
-          <h3 className="font-bold text-white mb-4">Competitor Price Radar</h3>
-          <div className="space-y-4">
-            <div className="flex items-center justify-between border-b border-white/5 pb-2 text-[10px] text-text-muted font-bold uppercase tracking-widest">
-              <span>Product</span>
-              <span>Their Price</span>
-              <span>Action</span>
-            </div>
-            
-            <div className="flex items-center justify-between">
-              <div className="flex flex-col">
-                <span className="text-sm font-medium text-white">Blue Band 500g</span>
-                <span className="text-[10px] text-text-muted">Hangar Shop • 2km away</span>
-              </div>
-              <span className="text-danger font-bold">2,100 RWF</span>
-              <span className="text-[10px] text-primary bg-primary/10 px-2 py-1 rounded font-bold">Match Price</span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <div className="flex flex-col">
-                <span className="text-sm font-medium text-white">Inyange Milk 1L</span>
-                <span className="text-[10px] text-text-muted">Kimironko Mkt • 5km away</span>
-              </div>
-              <span className="text-primary font-bold">850 RWF</span>
-              <span className="text-[10px] text-text-muted bg-white/5 px-2 py-1 rounded font-bold">Winning</span>
-            </div>
-          </div>
-        </Card>
+        <AIInsightsPanel />
       </div>
     </div>
   );

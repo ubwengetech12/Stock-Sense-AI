@@ -1,17 +1,18 @@
 // File: src/store/useStore.ts
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { 
-  Product, Supplier, SaleRecord, ForecastItem, 
-  StockAlert, Competitor, DashboardStats, PurchaseOrder 
+import {
+  Product, Supplier, SaleRecord, ForecastItem,
+  StockAlert, Competitor, DashboardStats, PurchaseOrder
 } from '../lib/types';
 import { calculateForecast } from '../lib/forecast';
 import { db, auth, handleFirestoreError } from '../lib/firebase';
-import { 
-  collection, query, where, onSnapshot, 
-  addDoc, updateDoc, deleteDoc, doc 
+import {
+  collection, onSnapshot,
+  addDoc, updateDoc, deleteDoc, doc, setDoc, getDoc
 } from 'firebase/firestore';
-import { subDays, format } from 'date-fns';
+import { subDays } from 'date-fns';
+import { generateAIInsights, AIInsights } from '../lib/gemini';
 
 // ─── SEED DATA ────────────────────────────────────────────────────────────────
 
@@ -34,7 +35,6 @@ const SEED_PRODUCTS: Product[] = [
   { id: 'p10', name: 'Notebook A4', category: 'Other', unit: 'pieces', currentStock: 35, minStock: 10, reorderPoint: 15, costPrice: 800, sellingPrice: 1200, supplierId: 's3', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
 ];
 
-/** Generate 90 days of fake sales history for all seed products */
 function generateSeedSales(): SaleRecord[] {
   const records: SaleRecord[] = [];
   SEED_PRODUCTS.forEach(product => {
@@ -54,6 +54,27 @@ function generateSeedSales(): SaleRecord[] {
 
 const SEED_SALES = generateSeedSales();
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+// 30 minutes in milliseconds — minimum gap between Gemini calls
+const AI_COOLDOWN_MS = 30 * 60 * 1000;
+
+// Firestore doc that caches the last AI result
+const AI_CACHE_DOC = 'ai_insights/latest';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+async function ensureInFirestore(
+  collectionName: string,
+  item: { id: string; [key: string]: any }
+) {
+  const ref = doc(db, collectionName, item.id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    await setDoc(ref, { ...item, userId: auth.currentUser?.uid ?? 'exhibition' });
+  }
+}
+
 // ─── STORE ────────────────────────────────────────────────────────────────────
 
 interface StockSenseState {
@@ -66,24 +87,43 @@ interface StockSenseState {
   orders: PurchaseOrder[];
   stats: DashboardStats;
   isInitialized: boolean;
-  
+
+  // AI Insights
+  aiInsights: AIInsights | null;
+  aiLoading: boolean;
+  aiError: string | null;
+  aiLastFetched: number | null; // timestamp ms
+
   initialize: () => () => void;
+
+  // Products
   addProduct: (product: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
   updateProduct: (id: string, updates: Partial<Product>) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
   updateStock: (productId: string, quantityChange: number) => Promise<void>;
+
+  // Suppliers
+  addSupplier: (supplier: Omit<Supplier, 'id'>) => Promise<void>;
+  deleteSupplier: (id: string) => Promise<void>;
+
+  // Sales
   addSale: (sale: Omit<SaleRecord, 'id' | 'date'>) => Promise<void>;
-  generateForecasts: () => void;
-  updateAlerts: () => void;
+
+  // Orders
   addPurchaseOrder: (order: Omit<PurchaseOrder, 'id' | 'createdAt'>) => Promise<void>;
   updateOrderStatus: (id: string, status: PurchaseOrder['status']) => Promise<void>;
+
+  // AI
+  fetchAIInsights: (force?: boolean) => Promise<void>;
+
+  generateForecasts: () => void;
+  updateAlerts: () => void;
   computeStats: () => void;
 }
 
 export const useStore = create<StockSenseState>()(
   persist(
     (set, get) => ({
-      // ── Initial state uses seed data so the app looks alive immediately ──
       products: SEED_PRODUCTS,
       suppliers: SEED_SUPPLIERS,
       sales: SEED_SALES,
@@ -92,6 +132,10 @@ export const useStore = create<StockSenseState>()(
       forecast: [],
       orders: [],
       isInitialized: false,
+      aiInsights: null,
+      aiLoading: false,
+      aiError: null,
+      aiLastFetched: null,
       stats: {
         totalProducts: SEED_PRODUCTS.length,
         lowStockAlerts: SEED_PRODUCTS.filter(p => p.currentStock <= p.minStock).length,
@@ -100,67 +144,135 @@ export const useStore = create<StockSenseState>()(
       },
 
       initialize: () => {
-        const user = auth.currentUser;
-        // If no user logged in, keep seed data visible for demo
-        if (!user) {
-          get().updateAlerts();
-          get().generateForecasts();
-          return () => {};
-        }
-
-        const qProducts = query(collection(db, 'products'), where('userId', '==', user.uid));
-        const unsubProducts = onSnapshot(qProducts, (snapshot) => {
+        const unsubProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
           if (snapshot.docs.length > 0) {
-            // Real data exists — replace seed data
             const products = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Product));
             set({ products });
           }
           get().updateAlerts();
           get().generateForecasts();
-        });
+        }, (err) => console.error('products listener:', err));
 
-        const qSales = query(collection(db, 'sales'), where('userId', '==', user.uid));
-        const unsubSales = onSnapshot(qSales, (snapshot) => {
+        const unsubSales = onSnapshot(collection(db, 'sales'), (snapshot) => {
           if (snapshot.docs.length > 0) {
             const sales = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as SaleRecord));
             set({ sales });
           }
-        });
+        }, (err) => console.error('sales listener:', err));
 
-        const qSuppliers = query(collection(db, 'suppliers'), where('userId', '==', user.uid));
-        const unsubSuppliers = onSnapshot(qSuppliers, (snapshot) => {
+        const unsubSuppliers = onSnapshot(collection(db, 'suppliers'), (snapshot) => {
           if (snapshot.docs.length > 0) {
             const suppliers = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Supplier));
             set({ suppliers });
           }
-        });
+        }, (err) => console.error('suppliers listener:', err));
+
+        // Load cached AI insights from Firestore on startup
+        const unsubAI = onSnapshot(doc(db, 'ai_insights', 'latest'), (snap) => {
+          if (snap.exists()) {
+            const cached = snap.data() as AIInsights & { fetchedAt: number };
+            set({
+              aiInsights: cached,
+              aiLastFetched: cached.fetchedAt ?? null,
+            });
+          }
+        }, () => {/* ignore if collection doesn't exist yet */});
 
         set({ isInitialized: true });
-        return () => { unsubProducts(); unsubSales(); unsubSuppliers(); };
+        return () => {
+          unsubProducts();
+          unsubSales();
+          unsubSuppliers();
+          unsubAI();
+        };
       },
 
-      addProduct: async (p) => {
-        const user = auth.currentUser;
-        if (!user) return;
+      // ── AI Insights ───────────────────────────────────────────────────────
+
+      fetchAIInsights: async (force = false) => {
+        const { aiLoading, aiLastFetched, products, sales, suppliers } = get();
+
+        // Prevent parallel calls
+        if (aiLoading) return;
+
+        // Enforce cooldown unless forced
+        if (!force && aiLastFetched && Date.now() - aiLastFetched < AI_COOLDOWN_MS) {
+          const remainingMin = Math.ceil((AI_COOLDOWN_MS - (Date.now() - aiLastFetched)) / 60000);
+          set({ aiError: `Next refresh available in ${remainingMin} min` });
+          setTimeout(() => set({ aiError: null }), 3000);
+          return;
+        }
+
+        set({ aiLoading: true, aiError: null });
+
         try {
-          await addDoc(collection(db, 'products'), {
-            ...p,
-            userId: user.uid,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+          const insights = await generateAIInsights(products, sales, suppliers);
+          const fetchedAt = Date.now();
+
+          // Cache result in Firestore so all users share it
+          try {
+            await setDoc(doc(db, 'ai_insights', 'latest'), {
+              ...insights,
+              fetchedAt,
+            });
+          } catch {
+            // Cache write failed — still show result locally
+          }
+
+          set({
+            aiInsights: insights,
+            aiLastFetched: fetchedAt,
+            aiLoading: false,
+            aiError: null,
           });
+        } catch (e: any) {
+          set({
+            aiLoading: false,
+            aiError: 'AI request failed. Try again shortly.',
+          });
+        }
+      },
+
+      // ── Products ──────────────────────────────────────────────────────────
+
+      addProduct: async (p) => {
+        const now = new Date().toISOString();
+        const data = {
+          ...p,
+          userId: auth.currentUser?.uid ?? 'exhibition',
+          createdAt: now,
+          updatedAt: now,
+        };
+        try {
+          const docRef = await addDoc(collection(db, 'products'), data);
+          set(state => ({ products: [...state.products, { ...data, id: docRef.id }] }));
+          get().updateAlerts();
+          get().generateForecasts();
         } catch (e) { handleFirestoreError(e, 'create', 'products'); }
       },
 
       updateProduct: async (id, updates) => {
+        const product = get().products.find(p => p.id === id);
+        if (!product) return;
         try {
-          await updateDoc(doc(db, 'products', id), { ...updates, updatedAt: new Date().toISOString() });
+          await ensureInFirestore('products', product);
+          const updatedFields = { ...updates, updatedAt: new Date().toISOString() };
+          await updateDoc(doc(db, 'products', id), updatedFields);
+          set(state => ({
+            products: state.products.map(p => p.id === id ? { ...p, ...updatedFields } : p),
+          }));
+          get().updateAlerts();
         } catch (e) { handleFirestoreError(e, 'update', `products/${id}`); }
       },
 
       deleteProduct: async (id) => {
+        const product = get().products.find(p => p.id === id);
+        if (!product) return;
         try {
+          await ensureInFirestore('products', product);
           await deleteDoc(doc(db, 'products', id));
+          set(state => ({ products: state.products.filter(p => p.id !== id) }));
+          get().updateAlerts();
         } catch (e) { handleFirestoreError(e, 'delete', `products/${id}`); }
       },
 
@@ -168,25 +280,75 @@ export const useStore = create<StockSenseState>()(
         const product = get().products.find(p => p.id === id);
         if (!product) return;
         try {
-          await updateDoc(doc(db, 'products', id), {
-            currentStock: Math.max(0, product.currentStock + change),
-            updatedAt: new Date().toISOString()
-          });
+          await ensureInFirestore('products', product);
+          const newStock = Math.max(0, product.currentStock + change);
+          await updateDoc(doc(db, 'products', id), { currentStock: newStock, updatedAt: new Date().toISOString() });
+          set(state => ({
+            products: state.products.map(p => p.id === id ? { ...p, currentStock: newStock } : p),
+          }));
+          get().updateAlerts();
         } catch (e) { handleFirestoreError(e, 'update', `products/${id}`); }
       },
 
-      addSale: async (s) => {
-        const user = auth.currentUser;
-        if (!user) return;
+      // ── Suppliers ─────────────────────────────────────────────────────────
+
+      addSupplier: async (s) => {
+        const data = {
+          ...s,
+          userId: auth.currentUser?.uid ?? 'exhibition',
+          lastOrderDate: null,
+        };
         try {
-          await addDoc(collection(db, 'sales'), {
-            ...s,
-            userId: user.uid,
-            date: new Date().toISOString()
-          });
+          const docRef = await addDoc(collection(db, 'suppliers'), data);
+          set(state => ({ suppliers: [...state.suppliers, { ...data, id: docRef.id }] }));
+        } catch (e) { handleFirestoreError(e, 'create', 'suppliers'); }
+      },
+
+      deleteSupplier: async (id) => {
+        const supplier = get().suppliers.find(s => s.id === id);
+        if (!supplier) return;
+        try {
+          await ensureInFirestore('suppliers', supplier);
+          await deleteDoc(doc(db, 'suppliers', id));
+          set(state => ({ suppliers: state.suppliers.filter(s => s.id !== id) }));
+        } catch (e) { handleFirestoreError(e, 'delete', `suppliers/${id}`); }
+      },
+
+      // ── Sales ─────────────────────────────────────────────────────────────
+
+      addSale: async (s) => {
+        const now = new Date().toISOString();
+        const data = {
+          ...s,
+          userId: auth.currentUser?.uid ?? 'exhibition',
+          date: now,
+        };
+        try {
+          const docRef = await addDoc(collection(db, 'sales'), data);
+          set(state => ({ sales: [{ ...data, id: docRef.id }, ...state.sales] }));
           await get().updateStock(s.productId, -s.quantity);
         } catch (e) { handleFirestoreError(e, 'create', 'sales'); }
       },
+
+      // ── Orders ────────────────────────────────────────────────────────────
+
+      addPurchaseOrder: async (o) => {
+        try {
+          await addDoc(collection(db, 'orders'), {
+            ...o,
+            userId: auth.currentUser?.uid ?? 'exhibition',
+            createdAt: new Date().toISOString(),
+          });
+        } catch (e) { handleFirestoreError(e, 'create', 'orders'); }
+      },
+
+      updateOrderStatus: async (id, status) => {
+        try {
+          await updateDoc(doc(db, 'orders', id), { status });
+        } catch (e) { handleFirestoreError(e, 'update', `orders/${id}`); }
+      },
+
+      // ── Computed ──────────────────────────────────────────────────────────
 
       generateForecasts: () => {
         const { products, sales } = get();
@@ -215,29 +377,11 @@ export const useStore = create<StockSenseState>()(
             lowStockAlerts: newAlerts.length,
             monthlySalesRWF,
             overstockSavedRWF: 680000,
-          }
+          },
         });
       },
 
       computeStats: () => get().updateAlerts(),
-
-      addPurchaseOrder: async (o) => {
-        const user = auth.currentUser;
-        if (!user) return;
-        try {
-          await addDoc(collection(db, 'orders'), {
-            ...o,
-            userId: user.uid,
-            createdAt: new Date().toISOString()
-          });
-        } catch (e) { handleFirestoreError(e, 'create', 'orders'); }
-      },
-
-      updateOrderStatus: async (id, status) => {
-        try {
-          await updateDoc(doc(db, 'orders', id), { status });
-        } catch (e) { handleFirestoreError(e, 'update', `orders/${id}`); }
-      },
     }),
     {
       name: 'stocksense-storage',
@@ -246,6 +390,9 @@ export const useStore = create<StockSenseState>()(
         suppliers: state.suppliers,
         sales: state.sales,
         orders: state.orders,
+        // Persist last AI insights locally so it survives page refresh
+        aiInsights: state.aiInsights,
+        aiLastFetched: state.aiLastFetched,
       }),
     }
   )

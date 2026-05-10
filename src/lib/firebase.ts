@@ -1,11 +1,21 @@
 // File: src/lib/firebase.ts
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { getFirestore } from 'firebase/firestore';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDKLgjeTrKdHOR6Ra-UNDMDQERElViwa6w",
+  authDomain: "stocksenseai-f8e94.firebaseapp.com",
+  projectId: "stocksenseai-f8e94",
+  storageBucket: "stocksenseai-f8e94.firebasestorage.app",
+  messagingSenderId: "765152520956",
+  appId: "1:765152520956:web:46d16d959be37c24628579",
+};
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+// Use default Firestore database (no custom ID — your config has none)
+export const db = getFirestore(app);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
@@ -13,44 +23,17 @@ export interface FirestoreErrorInfo {
   error: string;
   operationType: 'create' | 'update' | 'delete' | 'list' | 'get' | 'write';
   path: string | null;
-  authInfo: {
-    userId: string;
-    email: string;
-    emailVerified: boolean;
-    isAnonymous: boolean;
-    providerInfo: { providerId: string; displayName: string; email: string; }[];
-  }
 }
 
-export function handleFirestoreError(error: any, operation: FirestoreErrorInfo['operationType'], path: string | null = null): never {
-  const user = auth.currentUser;
+export function handleFirestoreError(
+  error: any,
+  operation: FirestoreErrorInfo['operationType'],
+  path: string | null = null
+): never {
   const errorInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     operationType: operation,
     path,
-    authInfo: {
-      userId: user?.uid || 'unauthenticated',
-      email: user?.email || '',
-      emailVerified: user?.emailVerified || false,
-      isAnonymous: user?.isAnonymous || true,
-      providerInfo: user?.providerData.map(p => ({
-        providerId: p.providerId,
-        displayName: p.displayName || '',
-        email: p.email || ''
-      })) || []
-    }
   };
   throw new Error(JSON.stringify(errorInfo));
 }
-
-async function testConnection() {
-  try {
-    // Attempt to read a non-existent doc to trigger connection check
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration.");
-    }
-  }
-}
-testConnection();
